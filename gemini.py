@@ -1,127 +1,328 @@
+"""
+A class to manage gemini interactions
+"""
 import os
 import io
-import cairosvg
-import pathlib
-import textwrap
 import mimetypes
-import validators
 import tempfile
+import validators
 import requests
-from urllib.parse import urlsplit
+import cairosvg
 from rich.console import Console
 from rich.markdown import Markdown
-from enum import Enum
 from PIL import Image
-import google.generativeai as genai
+
+# only inside venv
+import google.generativeai          as genai
 import google.ai.generativelanguage as glm
-from google.cloud import storage
+
+# From MOST RESTRICTIVE -> TO LESS RESTRICTIVE
+_SAFETY_LOW_AND_ABOVE = {
+glm.HarmCategory.HARM_CATEGORY_HARASSMENT.name        : 'BLOCK_LOW_AND_ABOVE',
+glm.HarmCategory.HARM_CATEGORY_HATE_SPEECH.name       : 'BLOCK_LOW_AND_ABOVE',
+glm.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT.name : 'BLOCK_LOW_AND_ABOVE',
+glm.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT.name : 'BLOCK_LOW_AND_ABOVE',
+}
+_SAFETY_MEDIUM_AND_ABOVE = {
+glm.HarmCategory.HARM_CATEGORY_HARASSMENT.name        : 'BLOCK_MEDIUM_AND_ABOVE',
+glm.HarmCategory.HARM_CATEGORY_HATE_SPEECH.name       : 'BLOCK_MEDIUM_AND_ABOVE',
+glm.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT.name : 'BLOCK_MEDIUM_AND_ABOVE',
+glm.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT.name : 'BLOCK_MEDIUM_AND_ABOVE',
+}
+_SAFETY_ONLY_HIGH = {
+glm.HarmCategory.HARM_CATEGORY_HARASSMENT.name        : 'BLOCK_ONLY_HIGH',
+glm.HarmCategory.HARM_CATEGORY_HATE_SPEECH.name       : 'BLOCK_ONLY_HIGH',
+glm.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT.name : 'BLOCK_ONLY_HIGH',
+glm.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT.name : 'BLOCK_ONLY_HIGH',
+}
+_SAFETY_NONE = {
+glm.HarmCategory.HARM_CATEGORY_DANGEROUS.name         : 'BLOCK_NONE',
+glm.HarmCategory.HARM_CATEGORY_SEXUAL.name            : 'BLOCK_NONE',
+glm.HarmCategory.HARM_CATEGORY_HARASSMENT.name        : 'BLOCK_NONE',
+glm.HarmCategory.HARM_CATEGORY_HATE_SPEECH.name       : 'BLOCK_NONE',
+glm.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT.name : 'BLOCK_NONE',
+glm.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT.name : 'BLOCK_NONE',
+}
+
+_DEFAULT_MODEL = 'gemini-pro'
+_DEFAULT_CANDIDATE_COUNT = 1
+_DEFAULT_TEMPERATURE = 1.0
+_DEFAULT_MAX_OUTPUT_TOKENS = 9999999
+_DEFAULT_TOP_K = 32
+_DEFAULT_TOP_P = 1
+_DEFAULT_STOP_SEQUENCES = []
+_DEFAULT_SAFETY = _SAFETY_NONE
+_DEFAULT_MESSAGES = []
 
 class Gemini:
-    """
-    A class to manage gemini-pro interaction
-    """
-    __key:str               # API Key
-    __model:object          # model name
-    __available:object      # list available models
-    __temperature:float     # model temperature
-    __candidate_count:int   # reponse candidate max count
-    __stop_sequences:list   # stop sequcences
-    __max_output_tokens:int # max response lenght in tokes
-    __top_k:int             # top_k setting
-    __top_p:float           # top_p setting
-    __safety:dict           # safety settings
-    __chats:[genai.generative_models.ChatSession]
-    __questions:list        # questions history
-    __tools:list            # configured tools
-    __SAFETY_LOW_AND_ABOVE = {
-    glm.HarmCategory.HARM_CATEGORY_HARASSMENT.name        : 'BLOCK_LOW_AND_ABOVE',
-    glm.HarmCategory.HARM_CATEGORY_HATE_SPEECH.name       : 'BLOCK_LOW_AND_ABOVE',
-    glm.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT.name : 'BLOCK_LOW_AND_ABOVE',
-    glm.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT.name : 'BLOCK_LOW_AND_ABOVE',
-    }
-    __SAFETY_MEDIUM_AND_ABOVE = {
-    glm.HarmCategory.HARM_CATEGORY_HARASSMENT.name        : 'BLOCK_MEDIUM_AND_ABOVE',
-    glm.HarmCategory.HARM_CATEGORY_HATE_SPEECH.name       : 'BLOCK_MEDIUM_AND_ABOVE',
-    glm.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT.name : 'BLOCK_MEDIUM_AND_ABOVE',
-    glm.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT.name : 'BLOCK_MEDIUM_AND_ABOVE',
-    }
-    __SAFETY_ONLY_HIGH = {
-    glm.HarmCategory.HARM_CATEGORY_HARASSMENT.name        : 'BLOCK_ONLY_HIGH',
-    glm.HarmCategory.HARM_CATEGORY_HATE_SPEECH.name       : 'BLOCK_ONLY_HIGH',
-    glm.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT.name : 'BLOCK_ONLY_HIGH',
-    glm.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT.name : 'BLOCK_ONLY_HIGH',
-    }
-    __SAFETY_NONE = {
-    glm.HarmCategory.HARM_CATEGORY_DANGEROUS.name         : 'BLOCK_NONE',
-    glm.HarmCategory.HARM_CATEGORY_SEXUAL.name            : 'BLOCK_NONE',
-    glm.HarmCategory.HARM_CATEGORY_HARASSMENT.name        : 'BLOCK_NONE',
-    glm.HarmCategory.HARM_CATEGORY_HATE_SPEECH.name       : 'BLOCK_NONE',
-    glm.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT.name : 'BLOCK_NONE',
-    glm.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT.name : 'BLOCK_NONE',
-    }
+    _key:str                 # API Key
+    _available_models:object # list available models
+    _model:object            # model name
+    _tools:list              # configured tools
+    _candidate_count:int     # reponse candidate max count
+    _config:glm.GenerationConfig # glm.GenerationConfig
+    _stop_sequences:list     # stop sequcences
+    _temperature:float       # model randomnes
+    _max_output_tokens:int   # response max lenght, in tokens
+    _top_k:int               # top candidates consideration
+    _top_p:float             # max probability nucleus
+    _safety:object
+    _chats:[ genai.generative_models.ChatSession ]
+    _questions:list          # questions history
 
     @property
     def key(self):
-        """Return API key"""
-        return self.__key
-    @property
-    def model(self):
-        """Return model"""
-        return self.__model
+        return self._key
+
+    @key.setter
+    def key(self, api_key):
+        if isinstance(api_key, str):
+            if os.path.isfile(api_key):
+                with open(api_key, 'r', errors='strict') as f:
+                    self._key =  f.read().strip()
+        self._key = api_key
+
     @property
     def available_models(self):
-        """Return model"""
-        return self.__available
+        return self._available_models
+
+    @available_models.setter
+    def available_models(self, available_models):
+        self._available_models = available_models
+
     @property
-    def temperature(self):
-        """Return model temperature setting"""
-        return self.__temperature
-    @property
-    def top_k(self):
-        """Return model top_k setting"""
-        return self.top_k
-    @property
-    def top_p(self):
-        """Return model top_p setting"""
-        return self.__top_p
+    def model(self):
+        return self._model
+
+    @model.setter
+    def model(self, model_name):
+        self._available = [ m for m in genai.list_models() ]
+
+        if not model_name in { m.name.lstrip('models/') for m in self._available }:
+            raise ValueError(f"Model '{model_name}' not found")
+        current_model = None
+        for model in self._available:
+            if model.name.lstrip('models/') == model_name:
+                current_model = model
+                break
+        if current_model is None:
+            print("Model not found: {model_name}")
+            raise ValueError
+        try:
+            new_model = genai.GenerativeModel( model_name = model_name)
+            new_model.model_name
+        except Exception as exc:
+            print(f" Could not create model: {new_model.model_name}")
+            raise exc
+        else:
+            self._model =  new_model
+            self.candidate_count     = None
+            self.max_output_tokens   = None
+            self.temperature         = None
+            self.top_p               = None
+            self.top_k               = None
+            return
+
+    @model.deleter
+    def model(self, new_model):
+        self._model = None
+
     @property
     def tools(self):
-        """Return model tools"""
-        return self.__tools
-    @property
-    def max_output_tokens(self):
-        """Return max output tokens setting"""
-        return self.__max_output_tokens
+        return self._tools
+
+    @tools.setter
+    def tools(self, tools):
+        self._tools = tools
+
+    @tools.deleter
+    def tools(self):
+        self._tools = []
+
     @property
     def candidate_count(self):
-        """Return candidate response count setting"""
-        return self.__candidate_count
+        return self._candidate_count
+
+    @candidate_count.setter
+    def candidate_count(self, candidate_count : int = 1):
+        if candidate_count is None:
+            self._candidate_count = 1
+            return
+        if candidate_count < 0:
+            raise ValueError(f"candidate_count > 0 (given: {candidate_count})")
+        self._candidate_count = candidate_count
+        return
+
+    @candidate_count.deleter
+    def candidate_count(self):
+        self._candidate_count = _DEFAULT_CANDIDATE_COUNT
+        return
+
+    @property
+    def temperature(self):
+        return self._temperature
+
+    @temperature.setter
+    def temperature(self, temperature : float):
+        if temperature is None:
+            for m in self.available_models:
+                if m.name == self.model.model_name:
+                    self._temperature = m.temperature
+                    return
+        if 0.0 > temperature or 1.0 < temperature:
+            raise ValueError(f"Temperature range 0.0-1.0 (given: {value})")
+        self._temperature = temperature
+        return
+
+    @temperature.deleter
+    def temperature(self):
+        self._temperature = _DEFAULT_TEMPERATURE
+        return
+
+    @property
+    def top_k(self):
+        return self._top_k
+
+    @top_k.setter
+    def top_k(self, top_k : int):
+        if top_k is None:
+            for m in self.available_models:
+                if m.name == self.model.model_name:
+                    self._top_k = m.top_k
+                    return
+        if top_k < 0.0:
+            raise ValueError(f"top_k > 0 but given: {top_k}")
+        self._top_k = top_k
+        return
+
+    @top_k.deleter
+    def top_k(self):
+        self._top_k = _DEFAULT_TOP_K
+        return
+
+    @property
+    def top_p(self):
+        return self._top_p
+
+    @top_p.setter
+    def top_p(self, top_p : float):
+        if top_p is None:
+            for m in self.available_models:
+                if m.name == self.model.model_name:
+                    self._top_p = m.top_p
+                    return
+        if top_p < 0.0 or 1.0 < top_p:
+            raise ValueError(f"top_p must be 0.0 - 1.0 but was given {top_p}")
+        self._top_p = top_p
+        return
+
+    @top_p.deleter
+    def top_p(self):
+        self._top_p = _DEFAULT_TOP_P
+        return
+
+    @property
+    def max_output_tokens(self):
+        return self._config.max_output_tokens
+
+    @max_output_tokens.setter
+    def max_output_tokens(self, max_output_tokens:int):
+        if max_output_tokens is None:
+            for m in self.available_models:
+                if m.name == self.model.model_name:
+                    self._max_output_tokens = m.output_token_limit
+                    return
+        if max_output_tokens < 0:
+            raise ValueError(f"max out tokens must be > 0 (given: {max_output_tokens})")
+        self._max_output_tokens = max_output_tokens
+        return
+
+    @max_output_tokens.deleter
+    def max_output_tokens(self):
+        self._max_output_tokens =  _DEFAULT_MAX_OUTPUT_TOKENS
+        return
+
     @property
     def stop_sequences(self):
-        """Return stop sequences setting"""
-        return self.__stop_sequences
+        return self._stop_sequences
+
+    @stop_sequences.setter
+    def stop_sequences(self, sequences:str|list):
+        if sequences is None:
+            self._stop_sequences = []
+            return
+        if isinstance(sequences,str):
+            self._stop_sequences = [ sequences ]
+            return
+        return sequences
+
+    @stop_sequences.deleter
+    def stop_sequences(self):
+        self._stop_sequences = _DEFAULT_STOP_SEQUENCES
+        return
+
     @property
     def config(self):
-        """Return configuration structure"""
-        return self.__config
+        return  glm.GenerationConfig(
+            candidate_count     = self.candidate_count,
+            stop_sequences      = self.stop_sequences,
+            max_output_tokenns  = self.max_output_tokens,
+            temperature         = self.temperature,
+            top_p               = self.top_p,
+            tok_k               = self.top_k
+        )
+
     @property
     def safety(self):
-        """Return safety settings"""
-        return  self.__safety
+        return  self._safety
+
+    @safety.setter
+    def safety(self, safety_settings = None):
+        if safety_settings is None:
+            self._safety =  _SAFETY_NONE
+            return
+        self._safety = safety_settings
+        return
+
+    @safety.deleter
+    def safety(self, safety_settings = None):
+        self._safety = _DEFAULT_SAFETY
+        return
+
     @property
     def messages(self):
-        """Return model"""
-        return self.__messages
+        return self._messages
+
+    @messages.setter
+    def messages(self, message):
+        self._messages.append(message)
+        return
+
+    @messages.deleter
+    def messages(self):
+        self._messages = _DEFAULT_MESSAGES
+        return
+
     @property
-    def questions(self, *, raw=True):
-        """Return model"""
-        if raw:
-            return self. __questions
-    @property
-    def print_questions(self, selector = [-1] ):
+    def questions(self):
+        return self._questions
+
+    @questions.setter
+    def questions(self, question):
+        if isinstance(question, list):
+            self._questions.extend(question)
+        else:
+            self._questions.append(question)
+
+    @questions.deleter
+    def questions(self, question):
+        self._questions.append(question)
+        return
+
+    def print_questions(self, selector: int = -1):
         """pretty print questions"""
         console = Console()
-        for question in self. __questions[selctor]:
+        for question in self. _questions[selector]:
             try:
                 question.prompt_feedback # throws
                 console.print(Markdown("### *ANSWER*:"))
@@ -135,217 +336,70 @@ class Gemini:
                     qtext += part.text
                 console.print(Markdown(qtext))
         del console
+        return
 
-    def __init_key(self, **kwargs):
-        self.__key = None
-        try:
-            self.__key = key
-        except NameError:
-            pass
-        try:
-            self.__key  = os.environ[var]
-        except (NameError, KeyError):
-            pass
-        try:
-            with open(file, 'r', errors='strict') as f:
-                self.__key = f.read().strip()
-        except (NameError, FileNotFoundError):
-            pass
-        try:
-            self.__key  = os.environ['google_api_key']
-        except KeyError:
-            pass
-        try:
-            with open('/home/thales/.ssh/GOOGLE_GENAI_API_KEY', 'r') as f:
-                self.__key = f.read().strip()
-        except FileNotFoundError:
-            pass
-        try:
-            genai.configure(api_key=self.__key)
-        except:
-            raise ValueError(f"could not setup API keys")
-
-
-    def __init_temperature(self, value : float):
-        """ The randomness of the output """
-        if 0.0 > value or 1.0 < value:
-            raise ValueError(f"temperature must be float() in range 0.0 to 1.0")
-        self.__temperature = value
-
-    def __init_max_output_tokens(self, max_output_tokens:int):
-        """ The response lenght setting in tokens"""
-        if max_output_tokens < 0:
-            raise ValueError(f"max tokens > 0 but given: {max_output_tokens}")
-        self.__max_output_tokens = max_output_tokens
-
-    def __init_candidate_count(self, candidate_count : int):
-        """ The number of response candidates to generate """
-        if candidate_count < 0:
-            raise ValueError(f"candidate_count > 0 but given: {candidate_count}")
-        self.__candidate_count = candidate_count
-
-    def __init_stop_sequences(self, *sequences:str|list):
-        """ The stop sequences setting"""
-        if isinstance(sequences,str):
-            self.__stop_sequences = []
-            self.__stop_sequences.append(sequences)
-            return
-        self.__stop_sequences = [ seq for seq in  sequences ]
-
-    def __init_top_k(self, k : int):
-        """ The maximum number of tokens to consider when sampling.
-            Top-k sampling considers the set of top_k most probable tokens.
-        """
-        if k < 0.0:
-            raise ValueError(f"k > 0 but given: {k}")
-        self.__top_k = k
-
-    def __init_top_p(self, top_p : float):
-        """ The cumulative probability of tokens to consider when sampling.
-        """
-        if top_p < 0.0 or 1.0 < top_p:
-            raise ValueError(f"top_p must be 0.0 - 1.0 but was given {top_p}")
-        self.__top_p = top_p
-
-    def __init_model(self, *,
-                      model : str             = 'gemini-pro',
-                      temperature : float     = None,
-                      candidate_count : int   = None,
-                      stop_sequences:str|list = None,
-                      max_output_tokens : int = None,
-                      top_k : int             = None,
-                      top_p : float           = None,
-                      safety: object          = None):
-
-        self.__available = [ m for m in genai.list_models() ]
-
-        if not model in { m.name.lstrip('models/') for m in self.__available }:
-            raise ValueError(f"Model '{model}' not found")
-
-        for m in self.__available:
-            if m.name.lstrip('models/') == model:
-                current_model = m
-                break
-
-        if not candidate_count :
-            candidate_count    = 1
-        if not temperature :
-            temperature        = float(current_model.temperature)
-        if not max_output_tokens :
-            max_output_tokens  = int(current_model.output_token_limit)
-        if not top_k :
-            top_k              = int(current_model.top_k)
-        if not top_p :
-            top_p              = float(current_model.top_p)
-        if not safety:
-            safety             = self.__SAFETY_NONE
-        if isinstance(stop_sequences, str):
-            stop_sequences = [ stop_sequences ]
-        if not stop_sequences:
-            stop_sequences = []
-        self.__init_temperature(temperature)
-        self.__init_candidate_count(candidate_count)
-        self.__init_max_output_tokens(max_output_tokens)
-        self.__init_stop_sequences(stop_sequences)
-        self.__init_top_k(top_k)
-        self.__init_top_p(top_p)
-        self.__config = glm.GenerationConfig(
-                    temperature         = self.__temperature,
-                    candidate_count     = self.__candidate_count,
-                    max_output_tokens   = self.__max_output_tokens,
-                    top_k               = self.__top_k,
-                    top_p               = self.__top_p
-                    )
-        self.__init_safety( safety_settings = safety)
-        self.__model     = genai.GenerativeModel(
-            model_name        = current_model.name,
-            safety_settings   = self.safety,
-            generation_config = self.config,
-        )
-
-    def __init_safety(self, safety_settings : glm.SafetySetting = None):
-        if not safety_settings:
-            self.__safety = self.__SAFETY_NONE
-            return
-        self.__safety = safety_settings
-
-    def __get_url(self, url:str):
+    def _get_url(self, url:str):
         r = requests.get(url, stream=True)
         r.raise_for_status()
         contenttype = r.headers.get('Content-Type')
         mimetype, _ = mimetypes.guess_type(url)
         print(f"MIME TYPES: {mimetype} {contenttype}")
         if mimetype.startswith('image/'):
-            print("IMAGE DETECTED")
             with tempfile.NamedTemporaryFile( delete = False ) as fp:
                 try:
-                    print("IMAGE OPENING")
                     img = Image.open(io.BytesIO(r.content))
-                    print("IMAGE RETURNED")
                     return img
                 except Exception as exc:
                     print("CAUGTH OPENING : {exc.__name__} ")
                     pass
                 try:
                     img = Image.open(cairosvg.svg2png(r.content))
-                    print("IMAGE RETURNED")
                     return img
                 except:
-                    print("CAUGTH OPENING : {exc.__name__} ")
                     pass
         if mimetype.startswith('text/'):
-            print("TEXT DECTECTED, RETURNING")
             return r.text
         if mimetype.startswith('application/json'):
-            print("JSON DECTECTED, RETURNING")
             return r.text
         print("UNSUPPPORTED, RAISING")
         raise ValueError(f"Unpported types MIME:{mimetype}:{contenttype} in url {url}")
 
-    def __make_prompt(self, *args):
+    def _make_prompt(self, *args):
         prompt = []
-        for arg in list(*args):
+        # cast to list for not splitting strings
+        for arg in list(args):
             if Image.isImageType(arg):
-                    prompt.append(img)
-                    continue
+                prompt.append(img)
+                continue
             if isinstance(arg, str):
                 if os.path.isfile(arg):
-                    print("PATH DETECTED")
                     try:
                         img = Image.open(arg.strip())
                         prompt.append(img)
-                        print("IMAGE APPENDED")
                         continue
                     except:
                         pass
                 if validators.url(arg):
-                    print("URL DETECTED")
                     try:
-                        cont = self.__get_url(arg)
+                        cont = self._get_url(arg)
                         prompt.append(cont)
                         continue
                     except:
-                        print("URL FETCH FAILED")
                         pass
                 try:
-                    print("APPENDING TEXT")
                     prompt.append(arg)
                     continue
                 except:
                     pass
-                    print("NOT TEXT")
                 raise ValueError(f"Argument of invalid type: type({type(arg)}) : {arg}")
-        print("EXITING MAKE PROMPT")
         return prompt
 
     def ask(self, *args):
         """Standalone questions"""
-        print("CALLING MAKE PROMPT")
-        prompt   = self.__make_prompt(args)
-        print("CALLING GENERATE CONTENT")
-        response = self.__model.generate_content( prompt )
-        self.__questions.append(prompt)
-        self.__questions.append(response)
+        prompt   = self._make_prompt(*args)
+        response = self.model.generate_content( prompt )
+        self._questions.append(prompt)
+        self._questions.append(response)
         try:
             console = Console()
             console.print(Markdown(response.text))
@@ -356,43 +410,108 @@ class Gemini:
     def start_chat(self):
         """Creates a new chat"""
         chat = self.model.start_chat()
-        self.__chats.append(chat)
+        self._chats.append(chat)
 
-    def chat(self, *args, chat=-1):
+    def chat(self, chat:int = -1):
         """Turns conversation"""
-        prompt  = self.__make_prompt(args)
-        history = self.__messages
-        history.append({'role':'user' ,'parts': prompt.parts  })
-        response = self.__make_response(history)
+        console = Console()
+        console.print(Markdown("---"))
+        while True:
+            console.print("[bold green]USER[/]:")
+            try:
+                text = input()
+                prompt   = self._make_prompt(text)
+            except (KeyboardInterrupt, EOFError):
+                console.print(Markdown("---"))
+                console.print(Markdown("# End of chat"))
+                del console
+                return
+            response = self._chats[chat].send_message(prompt)
+            try:
+                console.print("\n[bold red]MODEL[/]:")
+                console.print(Markdown(response.text))
+                console.print(Markdown("---"))
+            except ValueError:
+                console.print(Markdown("## *RESPONSE REFUSED: SEE FEEDBACK*:"))
+                console.print(Markdown(response.prompt_feedback))
+                console.print(Markdown("---"))
+            except (KeyboardInterrupt, EOFError):
+                console.print(Markdown("---"))
+                console.print(Markdown("# End of chat"))
+                break
+        del console
+        return
+
+    def reconfigure(self, kwargs:dict):
+        print(f"RECONFIGURE:{kwargs}")
+        if not {'candidate_count', 'stop_sequences', 'max_output_tokens',
+                'temperature', 'top_p', 'top_k', 'config'}.issuperset(kwargs):
+            raise KeyError(f"Use only supported types: {keywords}")
+        if 'config' in kwargs:
+            if len(kwargs) > 1:
+                raise ValueError("Specifiy config or items, not both")
+            if not type(kwargs['config']) == type(glm.GenerationConfig()):
+                raise TypeError("config must be glm.GenerationConfig() type")
+            return kwargs['config']
+        # use setters to get default values
         try:
-            Console.print(Markdown(response.text))
-            self.__messages.append({'role':'model','parts': response.text })
-            self.__messages.append({'role':'user' ,'parts': prompt.parts  })
-        except ValueError:
-            return response.prompt_feedback
+            self.candidate_count = kwargs['candidate_count']
+        except IndexError("fail"):
+            pass
+        try:
+            self.stop_sequences = kwargs['stop_sequences']
+        except IndexError("fail"):
+            pass
+        try:
+            self.max_output_tokens = kwargs['max_output_tokens']
+        except IndexError("fail"):
+            pass
+        try:
+            self.temperature = kwargs['temperature']
+        except IndexError("fail"):
+            pass
+        try:
+            self.top_p = kwargs['top_p']
+        except IndexError("failed"):
+            pass
+        try:
+            self.top_k = kwargs['top_k']
+        except IndexError("fail"):
+            pass
+
+    def set_defaults(self):
+        for m in self.available_models:
+            if m.name == self.model.model_name:
+                self.temperature = m.temperature
+                self.top_k = m.top_k
+                self.top_p = m.top_p
+                self.max_output_tokens = m.output_token_limit
+                self.temperature = m.temperature
+                return
+        raise ValueError("Model not configured")
 
     def __init__(self, *,
-                 key: dict = None,
-                 model: str = None,
-                 temperature:float = None,
-                 candidate_count:int = None,
-                 stop_sequences:list = None,
-                 max_output_tokens:int = None,
-                 top_p:float = None,
-                 top_k:int = None,
-                 safety:object = None):
-        self.__init_key( key = key )
-        self.__init_model(
-            model = model,
-            temperature = temperature,
-            candidate_count = candidate_count,
-            max_output_tokens = max_output_tokens,
-            stop_sequences = stop_sequences,
-            top_p = top_p,
-            top_k = top_k,
-            safety = safety
-        )
-        self.__questions = []
-        self.__messages  = []
-
+         key: str              = None,
+         model: str            = None,
+         temperature:float     = None,
+         candidate_count:int   = None,
+         stop_sequences:list   = None,
+         max_output_tokens:int = None,
+         top_p:float           = None,
+         top_k:int             = None,
+         safety:object         = None):
+        self.key = key
+        self.available_models = [ m for m in genai.list_models() ]
+        self.model = model
+        self.safety = safety
+        self.temperature        = temperature
+        self.candidate_count    = candidate_count
+        self.stop_sequences     = stop_sequences
+        self.max_output_tokens  = max_output_tokens
+        self.top_p              = top_p
+        self.top_k              = top_k
+        self._questions = []
+        self._messages  = []
+        self._chats     = []
+        self.start_chat()
 
