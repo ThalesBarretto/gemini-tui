@@ -170,7 +170,7 @@ class Gemini:
                     self._temperature = m.temperature
                     return
         if 0.0 > temperature or 1.0 < temperature:
-            raise ValueError(f"Temperature range 0.0-1.0 (given: {value})")
+            raise ValueError(f"Temperature range 0.0-1.0 (given: {temperature})")
         self._temperature = temperature
         return
 
@@ -446,7 +446,7 @@ class Gemini:
         print(f"RECONFIGURE:{kwargs}")
         if not {'candidate_count', 'stop_sequences', 'max_output_tokens',
                 'temperature', 'top_p', 'top_k', 'config'}.issuperset(kwargs):
-            raise KeyError(f"Use only supported types: {keywords}")
+            raise KeyError(f"Use only supported types: {kwargs}")
         if 'config' in kwargs:
             if len(kwargs) > 1:
                 raise ValueError("Specifiy config or items, not both")
