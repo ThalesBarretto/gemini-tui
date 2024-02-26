@@ -38,6 +38,15 @@ You need a google cloud project, see oficial documentation:
 
     ```
 
+The `geminy.py` module should be moved to the virtual folder, like this:
+
+```data
+.
+└── repository
+    └── geminy
+        ├── geminy.py
+```
+
 2. Inside the virtual environment you've just created, run the python IDLE shell:
 
 ```python
