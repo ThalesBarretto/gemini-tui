@@ -106,8 +106,7 @@ class Gemini:
                 current_model = model
                 break
         if current_model is None:
-            print("Model not found: {model_name}")
-            raise ValueError
+            raise ValueError(f"Model not found: {model_name}")
         try:
             new_model = genai.GenerativeModel( model_name = model_name)
             new_model.model_name
@@ -343,7 +342,6 @@ class Gemini:
         r.raise_for_status()
         contenttype = r.headers.get('Content-Type')
         mimetype, _ = mimetypes.guess_type(url)
-        print(f"MIME TYPES: {mimetype} {contenttype}")
         if mimetype.startswith('image/'):
             with tempfile.NamedTemporaryFile( delete = False ) as fp:
                 try:
@@ -361,7 +359,6 @@ class Gemini:
             return r.text
         if mimetype.startswith('application/json'):
             return r.text
-        print("UNSUPPPORTED, RAISING")
         raise ValueError(f"Unpported types MIME:{mimetype}:{contenttype} in url {url}")
 
     def _make_prompt(self, *args):
